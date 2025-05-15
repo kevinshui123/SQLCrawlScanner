@@ -2,6 +2,9 @@
 # -*- coding: utf-8 -*-
 
 import re
+import time
+from urllib.parse import urlparse
+
 from PyQt5.QtCore import QObject, pyqtSignal
 from PyQt5.QtCore import QThread, pyqtSignal
 import subprocess
@@ -483,27 +486,37 @@ class DataExtractThread(QObject):
 
 
 class SQLMapRunnerThread(QThread):
-    """逐个URL运行SQLMap的线程 - 支持智能扫描"""
-    log_signal = pyqtSignal(str)  # 日志信号
-    result_signal = pyqtSignal(dict)  # 结果信号
-    progress_signal = pyqtSignal(int)  # 进度信号
+    """SQLMap运行线程 - 每个URL单独运行一个SQLMap进程"""
+    log_signal = pyqtSignal(str)
+    result_signal = pyqtSignal(dict)
+    progress_signal = pyqtSignal(int)
 
-    def __init__(self, config, url_file, scan_params, smart_scan=True):
+    def __init__(self, config, url_file, scan_params, smart_scan=True, max_instances=4):
         super(SQLMapRunnerThread, self).__init__()
         self.config = config
         self.url_file = url_file
         self.scan_params = scan_params
-        self.smart_scan = smart_scan  # 是否启用智能扫描
+        self.smart_scan = smart_scan
         self.running = True
+        self.max_instances = max_instances
 
     def run(self):
-        """线程主函数"""
+        """线程主函数 - 每个URL单独进程"""
         try:
             # 读取URL文件
             urls = []
             try:
                 with open(self.url_file, 'r', encoding='utf-8') as f:
                     urls = [line.strip() for line in f if line.strip()]
+
+                # 确保URL格式正确
+                fixed_urls = []
+                for url in urls:
+                    if not url.startswith(('http://', 'https://')):
+                        url = 'http://' + url
+                    fixed_urls.append(url)
+                urls = fixed_urls
+
             except Exception as e:
                 self.log_signal.emit(f"读取URL文件出错: {str(e)}")
                 return
@@ -512,215 +525,255 @@ class SQLMapRunnerThread(QThread):
                 self.log_signal.emit("URL文件为空，没有URL可扫描")
                 return
 
-            # 日志文件
-            log_dir = os.path.join(self.config.output_dir, "logs")
-            os.makedirs(log_dir, exist_ok=True)
-
-            # 获取SQLMap路径
+            # 获取SQLMap参数
             sqlmap_parts = self.config.sqlmap_path.split()
-            python_exe = sqlmap_parts[0]  # 例如 "python"
-            sqlmap_script = sqlmap_parts[1].strip('"')  # 去除引号
+            python_exe = sqlmap_parts[0]  # python
+            sqlmap_script = sqlmap_parts[1].strip('"')  # sqlmap.py路径
 
-            # 智能扫描需要跟踪已检测到漏洞的域名
+            # 创建工作目录
+            output_dir = os.path.join(self.config.output_dir, "single_url_mode")
+            os.makedirs(output_dir, exist_ok=True)
+
+            self.log_signal.emit(f"准备扫描 {len(urls)} 个URL，每个URL单独进程")
+
+            # 标准SQLMap参数
+            base_params = [
+                "--risk", str(self.scan_params.get("risk", 2)),
+                "--level", str(self.scan_params.get("level", 2)),
+                "--batch",
+                "--random-agent",
+                "--threads", str(self.scan_params.get("threads", 3)),
+                "--timeout", str(self.scan_params.get("timeout", 15)),
+                "--dbs"
+            ]
+
+            # 使用多线程管理并发进程
+            max_concurrent = min(self.max_instances, 4)  # 限制最大并发数
+            active_processes = 0
+            url_index = 0
+            total_urls = len(urls)
+            processes = []  # 存储所有进程信息
+            active_procs = []  # 存储活动进程
+
+            # 智能扫描域名跟踪
             vulnerable_domains = set()
 
-            # 添加域名跟踪
-            scanned_domains = set()
-            domain_param_patterns = {}
+            while url_index < total_urls and self.running:
+                # 检查是否可以启动新进程
+                while active_processes < max_concurrent and url_index < total_urls and self.running:
+                    url = urls[url_index]
+                    url_index += 1
 
-            # 逐个处理URL
-            for i, url in enumerate(urls):
-                if not self.running:
-                    self.log_signal.emit("扫描已中止")
-                    break
+                    # 如果启用智能扫描，检查域名是否已存在漏洞
+                    if self.smart_scan:
+                        try:
+                            domain = urlparse(url).netloc
+                            if domain in vulnerable_domains:
+                                # 域名已有漏洞，跳过扫描
+                                self.log_signal.emit(f"跳过URL: {url} (域名已发现漏洞)")
+                                self.result_signal.emit({
+                                    "url": url,
+                                    "vulnerable": False,
+                                    "detail": "跳过检测(同域名已发现漏洞)"
+                                })
+                                continue
+                        except:
+                            pass
+
+                    # 构建命令 - 使用单URL模式
+                    cmd = [
+                              python_exe,
+                              sqlmap_script,
+                              "-u", url
+                          ] + base_params + [
+                              "--output-dir", output_dir
+                          ]
+
+                    # 显示命令
+                    cmd_str = " ".join(cmd)
+                    self.log_signal.emit(f"扫描URL ({url_index}/{total_urls}): {url}")
+                    self.log_signal.emit(
+                        f"执行命令: python C:\\Users\\liamh\\Desktop\\sqlmap\\sqlmap1\\sqlmap.py -u {url} --risk 2 --level 2 --batch --random-agent --output-dir C:\\Users\\liamh\\Desktop\\sql-result --dbs -p mode")
+
+                    # 启动进程
+                    try:
+                        process = subprocess.Popen(
+                            cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            universal_newlines=True,
+                            bufsize=1
+                        )
+
+                        # 存储进程信息
+                        proc_info = {
+                            "process": process,
+                            "url": url,
+                            "cmd": cmd_str,
+                            "output": [],
+                            "vulnerable": False,
+                            "detail": "",
+                            "start_time": time.time()
+                        }
+
+                        processes.append(proc_info)
+                        active_procs.append(proc_info)
+                        active_processes += 1
+
+                    except Exception as e:
+                        self.log_signal.emit(f"启动SQLMap进程出错: {str(e)}")
+                        # 标记为失败
+                        self.result_signal.emit({
+                            "url": url,
+                            "vulnerable": False,
+                            "detail": f"启动失败: {str(e)}"
+                        })
+
+                # 检查活动进程的状态
+                completed_procs = []
+                for proc_info in active_procs:
+                    process = proc_info["process"]
+
+                    # 检查是否完成
+                    if process.poll() is not None:  # 进程已结束
+                        # 获取输出
+                        stdout, stderr = process.communicate()
+
+                        # 处理输出
+                        if stdout:
+                            for line in stdout.splitlines():
+                                proc_info["output"].append(line)
+                                self.log_signal.emit(line)
+
+                                # 检测漏洞
+                                if "is vulnerable" in line:
+                                    proc_info["vulnerable"] = True
+                                    param_match = re.search(r"Parameter '([^']+)'", line)
+                                    if param_match:
+                                        proc_info["detail"] = f"参数: {param_match.group(1)}"
+
+                                        # 如果启用智能扫描，添加到漏洞域名
+                                        if self.smart_scan:
+                                            try:
+                                                domain = urlparse(proc_info["url"]).netloc
+                                                vulnerable_domains.add(domain)
+                                            except:
+                                                pass
+
+                        # 发送结果
+                        self.result_signal.emit({
+                            "url": proc_info["url"],
+                            "vulnerable": proc_info["vulnerable"],
+                            "detail": proc_info["detail"]
+                        })
+
+                        # 标记为完成
+                        completed_procs.append(proc_info)
+                        active_processes -= 1
+
+                # 从活动进程列表中移除已完成的进程
+                for proc_info in completed_procs:
+                    active_procs.remove(proc_info)
+
+                # 检查长时间运行的进程
+                current_time = time.time()
+                for proc_info in active_procs[:]:
+                    # 如果进程运行时间超过timeout*2秒，终止它
+                    if current_time - proc_info["start_time"] > self.scan_params.get("timeout", 15) * 2:
+                        try:
+                            proc_info["process"].terminate()
+                            self.log_signal.emit(f"终止超时进程: {proc_info['url']}")
+                        except:
+                            pass
+
+                        # 发送结果
+                        self.result_signal.emit({
+                            "url": proc_info["url"],
+                            "vulnerable": False,
+                            "detail": "扫描超时"
+                        })
+
+                        # 从活动列表中移除
+                        active_procs.remove(proc_info)
+                        active_processes -= 1
 
                 # 更新进度
-                progress = int((i / len(urls)) * 100)
+                progress = int((url_index / total_urls) * 100)
                 self.progress_signal.emit(progress)
 
-                # 解析URL域名和参数模式
-                try:
-                    from urllib.parse import urlparse, parse_qs
-                    parsed_url = urlparse(url)
-                    domain = parsed_url.netloc
-                    query_params = parse_qs(parsed_url.query)
-                    param_pattern = ','.join(sorted(query_params.keys()))
-                except:
-                    domain = "unknown"
-                    param_pattern = ""
+                # 短暂休眠
+                time.sleep(0.1)
 
-                # 如果启用智能扫描且该域名已被检测出漏洞，则跳过
-                if self.smart_scan and domain in vulnerable_domains:
-                    self.log_signal.emit(f"\n--- 跳过URL [{i + 1}/{len(urls)}]: {url} ---")
-                    self.log_signal.emit(f"原因: 该域名 ({domain}) 已检测到存在SQL注入漏洞")
+            # 等待所有活动进程完成
+            while active_procs and self.running:
+                # 检查活动进程的状态
+                completed_procs = []
+                for proc_info in active_procs:
+                    process = proc_info["process"]
 
-                    # 添加到结果表中，但标记为已跳过
+                    # 检查是否完成
+                    if process.poll() is not None:  # 进程已结束
+                        # 获取输出
+                        stdout, stderr = process.communicate()
+
+                        # 处理输出
+                        if stdout:
+                            for line in stdout.splitlines():
+                                proc_info["output"].append(line)
+                                self.log_signal.emit(line)
+
+                                # 检测漏洞
+                                if "is vulnerable" in line:
+                                    proc_info["vulnerable"] = True
+                                    param_match = re.search(r"Parameter '([^']+)'", line)
+                                    if param_match:
+                                        proc_info["detail"] = f"参数: {param_match.group(1)}"
+
+                        # 发送结果
+                        self.result_signal.emit({
+                            "url": proc_info["url"],
+                            "vulnerable": proc_info["vulnerable"],
+                            "detail": proc_info["detail"]
+                        })
+
+                        # 标记为完成
+                        completed_procs.append(proc_info)
+
+                # 从活动进程列表中移除已完成的进程
+                for proc_info in completed_procs:
+                    active_procs.remove(proc_info)
+
+                # 更新进度
+                completed = total_urls - len(active_procs)
+                progress = int((completed / total_urls) * 100)
+                self.progress_signal.emit(progress)
+
+                # 短暂休眠
+                time.sleep(0.1)
+
+            # 终止所有进程（如果停止）
+            if not self.running:
+                for proc_info in active_procs:
+                    try:
+                        proc_info["process"].terminate()
+                    except:
+                        pass
+
+                    # 发送结果
                     self.result_signal.emit({
-                        "url": url,
+                        "url": proc_info["url"],
                         "vulnerable": False,
-                        "detail": "跳过检测(同域名已发现漏洞)"
+                        "detail": "扫描中断"
                     })
 
-                    continue
-
-                # 如果启用智能扫描且该域名参数模式已被扫描，则跳过
-                domain_param_key = f"{domain}:{param_pattern}"
-                if self.smart_scan and domain_param_key in domain_param_patterns:
-                    result = domain_param_patterns[domain_param_key]
-                    is_vulnerable = result.get("vulnerable", False)
-                    detail = result.get("detail", "")
-
-                    self.log_signal.emit(f"\n--- 跳过URL [{i + 1}/{len(urls)}]: {url} ---")
-                    self.log_signal.emit(f"原因: 类似URL已扫描 ({domain}，参数: {param_pattern})")
-
-                    # 直接使用之前的结果
-                    self.result_signal.emit({
-                        "url": url,
-                        "vulnerable": is_vulnerable,
-                        "detail": detail if is_vulnerable else "跳过检测(类似URL已扫描)"
-                    })
-
-                    continue
-
-                # 检查是否为静态资源
-                static_extensions = ['.css', '.js', '.jpg', '.jpeg', '.png', '.gif', '.svg', '.ico',
-                                     '.woff', '.woff2', '.ttf', '.eot', '.pdf', '.zip',
-                                     '.mp3', '.mp4', '.webp', '.tif', '.tiff', '.bmp']
-                path = parsed_url.path.lower()
-                if any(path.endswith(ext) for ext in static_extensions):
-                    self.log_signal.emit(f"\n--- 跳过URL [{i + 1}/{len(urls)}]: {url} ---")
-                    self.log_signal.emit(f"原因: 静态资源文件不太可能存在SQL注入漏洞")
-
-                    # 添加到结果表中，但标记为已跳过
-                    self.result_signal.emit({
-                        "url": url,
-                        "vulnerable": False,
-                        "detail": "跳过检测(静态资源文件)"
-                    })
-
-                    continue
-
-                # 开始扫描当前URL
-                self.log_signal.emit(f"\n--- 扫描URL [{i + 1}/{len(urls)}]: {url} ---")
-
-                # 自动从URL中提取参数
-                params = []
-                if '?' in url:
-                    query_part = url.split('?')[1]
-                    if '&' in query_part:
-                        param_pairs = query_part.split('&')
-                        for pair in param_pairs:
-                            if '=' in pair:
-                                param_name = pair.split('=')[0]
-                                params.append(param_name)
-                    elif '=' in query_part:
-                        param_name = query_part.split('=')[0]
-                        params.append(param_name)
-
-                # 创建单URL文件
-                single_url_file = os.path.join(self.config.output_dir, "single_url.txt")
-
-                try:
-                    with open(single_url_file, 'w', encoding='utf-8') as f:
-                        f.write(url + '\n')
-                except Exception as e:
-                    self.log_signal.emit(f"创建单URL文件时出错: {str(e)}")
-                    continue
-
-                # 构建命令
-                cmd = [
-                    python_exe,
-                    sqlmap_script,
-                    "-u", url,
-                    "--risk", str(self.scan_params.get("risk", 1)),
-                    "--level", str(self.scan_params.get("level", 1)),
-                    "--batch",
-                    "--random-agent",
-                    "--output-dir", self.config.output_dir,
-                    "--dbs"
-                ]
-
-                # 如果检测到参数，使用-p指定
-                if params:
-                    param_str = ",".join(params)
-                    cmd.extend(["-p", param_str])
-                    self.log_signal.emit(f"检测到URL参数: {param_str}")
-
-                # 日志信息
-                cmd_str = " ".join(cmd)
-                self.log_signal.emit(f"执行命令: {cmd_str}")
-
-                # 创建进程
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    universal_newlines=True,
-                    bufsize=1,
-                    shell=False
-                )
-
-                # 漏洞标志和详情
-                vulnerable = False
-                detail = ""
-                vulnerable_param = ""
-
-                # 读取输出
-                for line in iter(process.stdout.readline, ''):
-                    if not self.running:
-                        process.terminate()
-                        self.log_signal.emit("扫描已中止")
-                        break
-
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    # 发送日志
-                    self.log_signal.emit(line)
-
-                    # 检测漏洞
-                    if "is vulnerable" in line:
-                        vulnerable = True
-                        param_match = re.search(r"Parameter '([^']+)'", line)
-                        if param_match:
-                            vulnerable_param = param_match.group(1)
-                            detail = f"参数: {vulnerable_param}"
-
-                # 读取错误输出
-                stderr = process.stderr.read()
-                if stderr:
-                    self.log_signal.emit(f"错误: {stderr}")
-
-                # 等待进程完成
-                return_code = process.wait()
-
-                # 发送结果信号
-                self.result_signal.emit({
-                    "url": url,
-                    "vulnerable": vulnerable,
-                    "detail": detail
-                })
-
-                # 如果发现漏洞，将域名添加到已漏洞域名集合
-                if vulnerable and self.smart_scan:
-                    vulnerable_domains.add(domain)
-                    self.log_signal.emit(f"已将域名 {domain} 添加到跳过列表(发现漏洞)")
-
-                # 保存扫描结果
-                domain_param_patterns[domain_param_key] = {
-                    "vulnerable": vulnerable,
-                    "detail": detail
-                }
-
-            # 完成所有URL
+            # 发送100%进度
             self.progress_signal.emit(100)
-            self.log_signal.emit("\n所有URL扫描完成!")
+            self.log_signal.emit("所有URL扫描完成")
 
         except Exception as e:
             import traceback
             error_text = traceback.format_exc()
-            self.log_signal.emit(f"扫描线程出错: {str(e)}\n{error_text}")
+            self.log_signal.emit(f"SQLMap运行线程出错: {str(e)}\n{error_text}")
 
         # 发送完成信号
         self.finished.emit()
@@ -728,3 +781,4 @@ class SQLMapRunnerThread(QThread):
     def stop(self):
         """停止扫描"""
         self.running = False
+        self.log_signal.emit("正在停止所有SQLMap进程...")

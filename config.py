@@ -21,9 +21,10 @@ class Config:
         # SQLMap设置默认值
         self.risk_level = 2
         self.test_level = 2
-        self.threads = 10
-        self.timeout = 60
-        self.technique = "BEUSTQ"
+        self.threads = 5  # 默认每实例线程数
+        self.instances = 4  # 默认并发实例数
+        self.timeout = 15  # 默认超时时间
+        self.technique = "BEUSTQ"  # 默认使用所有技术
         self.tamper_scripts = ["space2comment", "charencode"]
         self.auto_exploit = False
         self.extract_rows = 20

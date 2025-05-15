@@ -356,7 +356,7 @@ class MainWindow(QMainWindow):
         )
 
     def create_scan_tab(self):
-        """创建扫描设置标签页"""
+        """创建扫描设置标签页 - 移除测试技术选项"""
         scan_tab = QWidget()
         self.tabs.addTab(scan_tab, "扫描设置")
 
@@ -399,9 +399,65 @@ class MainWindow(QMainWindow):
         self.level_combo.setCurrentIndex(self.config.test_level - 1)
         risk_level_layout.addWidget(self.level_combo)
 
+        # 性能优化参数
+        performance_group = QGroupBox("性能优化")
+        layout.addWidget(performance_group)
+        performance_layout = QVBoxLayout()
+        performance_group.setLayout(performance_layout)
+
+        # 线程和实例设置
+        thread_instance_layout = QHBoxLayout()
+        performance_layout.addLayout(thread_instance_layout)
+
+        # 线程数设置
+        thread_instance_layout.addWidget(QLabel("每实例线程数:"))
+        self.threads_spin = QSpinBox()
+        self.threads_spin.setRange(1, 10)
+        self.threads_spin.setValue(3)  # 默认值为3
+        self.threads_spin.setToolTip("每个SQLMap实例使用的线程数")
+        thread_instance_layout.addWidget(self.threads_spin)
+
+        # 实例数设置
+        thread_instance_layout.addWidget(QLabel("并发实例数:"))
+        self.instances_spin = QSpinBox()
+        self.instances_spin.setRange(1, 8)
+        self.instances_spin.setValue(3)  # 默认值为3
+        self.instances_spin.setToolTip("同时运行的SQLMap实例数量，增加此值可提高扫描速度，但会消耗更多系统资源")
+        thread_instance_layout.addWidget(self.instances_spin)
+
+        # 超时设置
+        timeout_layout = QHBoxLayout()
+        performance_layout.addLayout(timeout_layout)
+        timeout_layout.addWidget(QLabel("超时时间(秒):"))
+        self.timeout_spin = QSpinBox()
+        self.timeout_spin.setRange(5, 60)
+        self.timeout_spin.setValue(15)
+        self.timeout_spin.setToolTip("请求超时时间，减少此值可避免在不响应的URL上浪费时间")
+        timeout_layout.addWidget(self.timeout_spin)
+
+        # 删除测试技术选择部分
+        # 删除以下代码块
+        # technique_layout = QHBoxLayout()
+        # performance_layout.addLayout(technique_layout)
+        # technique_layout.addWidget(QLabel("测试技术:"))
+        # self.technique_combo = QComboBox()
+        # self.technique_combo.addItems([
+        #    "BEUSTQ (全部技术)",
+        #    "BEU (基本, 错误, 联合查询)",
+        #    "B (只使用布尔盲注)",
+        #    "E (只使用错误注入)",
+        #    "U (只使用联合查询注入)",
+        #    "S (只使用堆栈查询注入)",
+        #    "T (只使用时间盲注)",
+        #    "Q (只使用内联查询)"
+        # ])
+        # self.technique_combo.setCurrentIndex(0)
+        # self.technique_combo.setToolTip("限制使用的测试技术可以加快扫描速度")
+        # technique_layout.addWidget(self.technique_combo)
+
         # 高级选项
         advanced_options_layout = QHBoxLayout()
-        basic_layout.addLayout(advanced_options_layout)
+        performance_layout.addLayout(advanced_options_layout)
 
         # 添加智能扫描选项
         self.smart_scan_check = QCheckBox("智能扫描(发现一个网站存在漏洞后跳过该网站其他URL)")
@@ -1617,7 +1673,7 @@ class MainWindow(QMainWindow):
             self.output_dir_edit.setText(dir_path)
 
     def start_scan(self):
-        """开始扫描 - 支持智能扫描"""
+        """开始扫描 - 移除测试技术参数"""
         # 确保有URL可扫描
         if not self.url_manager.param_urls:
             self.url_manager.filter_param_urls()
@@ -1650,7 +1706,9 @@ class MainWindow(QMainWindow):
         # 准备扫描参数
         params = {
             "risk": self.config.risk_level,
-            "level": self.config.test_level
+            "level": self.config.test_level,
+            "threads": self.threads_spin.value(),
+            "timeout": self.timeout_spin.value()
         }
 
         # 是否启用智能扫描
@@ -1673,8 +1731,14 @@ class MainWindow(QMainWindow):
             # 导入SQLMapRunnerThread类
             from workers import SQLMapRunnerThread
 
-            # 创建线程实例，传入智能扫描选项
-            self.sqlmap_runner = SQLMapRunnerThread(self.config, temp_file, params, smart_scan)
+            # 创建线程实例，传入智能扫描选项和并发实例数
+            self.sqlmap_runner = SQLMapRunnerThread(
+                self.config,
+                temp_file,
+                params,
+                smart_scan=smart_scan,
+                max_instances=self.instances_spin.value()
+            )
 
             # 连接信号
             self.sqlmap_runner.log_signal.connect(self.update_scan_log)
@@ -1688,7 +1752,12 @@ class MainWindow(QMainWindow):
             # 显示开始信息
             url_count = len(self.url_manager.param_urls)
             mode_str = "启用智能扫描" if smart_scan else "常规扫描"
+
+            # 显示优化参数 - 移除测试技术部分
+            optimization_info = f"线程数: {params['threads']}/实例, 实例数: {self.instances_spin.value()}, 超时: {params['timeout']}秒"
+
             self.scan_log_text.append(f"准备{mode_str} {url_count} 个URL...")
+            self.scan_log_text.append(f"优化参数: {optimization_info}")
 
         except Exception as e:
             import traceback

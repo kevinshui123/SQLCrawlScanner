@@ -939,9 +939,7 @@ class EnhancedWebCrawler(QThread):
 
                             form_urls.append(form_url)
 
-                            # 添加SQL注入测试值
-                            sql_test_url = f"{form_action}?{field_name}=1' OR '1'='1"
-                            form_urls.append(sql_test_url)
+
 
         except Exception as e:
             print(f"表单处理出错: {str(e)}")
