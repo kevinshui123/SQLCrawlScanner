@@ -1,4 +1,4 @@
-# SpiderSQLi
+# SQLCrawlScanner
 
 一个基于PyQt5的SQLMap图形界面工具，集成了Web爬虫、URL管理和SQL注入扫描功能。
 
